@@ -25,8 +25,9 @@ const (
 	RTPBufSize   = 65536
 	// VP8BufSize fits one RTP packet: 1200 MTU - 1 VP8 descriptor - 64 tunnel wrapper - 9 protocol frame
 	// (tunnel wrapper = 20 vp8 keepalive header + 4 epoch + 24 XChaCha20 nonce + 16 Poly1305 tag)
-	VP8BufSize   = 1126
-	DCBufSize    = 32768
+	VP8BufSize = 1126
+	// Keep DC payloads small for mobile networks with low/unstable PMTU.
+	DCBufSize = 1000
 )
 
 var (
