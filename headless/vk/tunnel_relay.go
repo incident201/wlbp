@@ -54,12 +54,7 @@ func NewTunnelRelay() *TunnelRelay {
 }
 
 func (u *TunnelRelay) Init(iceServers []webrtc.ICEServer) error {
-	config := webrtc.Configuration{ICEServers: iceServers}
-	if vkForceRelayOnly {
-		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
-	}
-
-	pc, err := webrtc.NewPeerConnection(config)
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return err
 	}
@@ -146,49 +141,6 @@ func (u *TunnelRelay) Init(iceServers []webrtc.ICEServer) error {
 		}
 	})
 
-	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[relay] ICE state: %s", state.String())
-
-		if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
-			go func() {
-				time.Sleep(500 * time.Millisecond)
-
-				if pc.SCTP() == nil {
-					return
-				}
-
-				dtls := pc.SCTP().Transport()
-				if dtls == nil {
-					return
-				}
-
-				ice := dtls.ICETransport()
-				if ice == nil {
-					return
-				}
-
-				pair, err := ice.GetSelectedCandidatePair()
-				if err != nil {
-					log.Printf("[relay] selected ICE pair error: %v", err)
-					return
-				}
-				if pair == nil {
-					log.Printf("[relay] selected ICE pair: <nil>")
-					return
-				}
-
-				log.Printf(
-					"[relay] selected ICE pair: local=%s/%s/%s remote=%s/%s/%s",
-					pair.Local.Typ.String(),
-					pair.Local.Protocol.String(),
-					pair.Local.Address,
-					pair.Remote.Typ.String(),
-					pair.Remote.Protocol.String(),
-					pair.Remote.Address,
-				)
-			}()
-		}
-	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("[relay] connection state: %s (mode=%s)", state.String(), u.mode)
 		if u.externalCSC != nil {

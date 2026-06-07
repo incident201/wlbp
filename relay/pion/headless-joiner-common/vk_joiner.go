@@ -24,7 +24,6 @@ import (
 const (
 	vkReconnectInitialDelay = time.Second
 	vkReconnectMaxDelay     = 16 * time.Second
-	vkForceRelayOnly        = true
 )
 
 type vkAuthRottenError struct {
@@ -569,53 +568,17 @@ func (h *VKHeadlessJoiner) handleConnection(msg map[string]interface{}) {
 	}
 }
 
-func expandTurnURLsWithTCP(urls []string) []string {
-	seen := make(map[string]struct{}, len(urls)*2)
-	out := make([]string, 0, len(urls)*2)
-
-	add := func(u string) {
-		u = strings.TrimSpace(u)
-		if u == "" {
-			return
-		}
-		if _, ok := seen[u]; ok {
-			return
-		}
-		seen[u] = struct{}{}
-		out = append(out, u)
-	}
-
-	for _, u := range urls {
-		add(u)
-
-		if strings.HasPrefix(u, "turn:") && !strings.Contains(u, "transport=") {
-			add(u + "?transport=tcp")
-		}
-	}
-
-	return out
-}
-
 func (h *VKHeadlessJoiner) initPC() {
 	var iceServers []webrtc.ICEServer
-
-	if !vkForceRelayOnly && len(h.joinResp.StunServer.URLs) > 0 {
+	if len(h.joinResp.StunServer.URLs) > 0 {
 		iceServers = append(iceServers, webrtc.ICEServer{URLs: h.joinResp.StunServer.URLs})
 	}
-
 	if len(h.joinResp.TurnServer.URLs) > 0 {
-		turnURLs := expandTurnURLsWithTCP(h.joinResp.TurnServer.URLs)
-		h.logFn("headless: TURN urls expanded: %v", turnURLs)
-
 		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs:       turnURLs,
+			URLs:       h.joinResp.TurnServer.URLs,
 			Username:   h.joinResp.TurnServer.Username,
 			Credential: h.joinResp.TurnServer.Credential,
 		})
-	}
-
-	if vkForceRelayOnly {
-		h.logFn("headless: ICE policy: relay-only")
 	}
 
 	mode := h.authParams.TunnelMode
@@ -627,15 +590,9 @@ func (h *VKHeadlessJoiner) initPC() {
 		h.PCConfig.ConfigureSettingEngine(&settingEngine)
 	}
 
-	config := webrtc.Configuration{
+	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)).NewPeerConnection(webrtc.Configuration{
 		ICEServers: iceServers,
-	}
-
-	if vkForceRelayOnly {
-		config.ICETransportPolicy = webrtc.ICETransportPolicyRelay
-	}
-
-	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)).NewPeerConnection(config)
+	})
 	if err != nil {
 		h.logFn("headless: failed to create PC: %v", err)
 		return
@@ -679,49 +636,6 @@ func (h *VKHeadlessJoiner) initPC() {
 			return
 		}
 		h.onLocalICECandidate(candidate)
-	})
-	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		h.logFn("headless: ICE state: %s", state.String())
-
-		if state == webrtc.ICEConnectionStateConnected || state == webrtc.ICEConnectionStateCompleted {
-			go func() {
-				time.Sleep(500 * time.Millisecond)
-
-				if pc.SCTP() == nil {
-					return
-				}
-
-				dtls := pc.SCTP().Transport()
-				if dtls == nil {
-					return
-				}
-
-				ice := dtls.ICETransport()
-				if ice == nil {
-					return
-				}
-
-				pair, err := ice.GetSelectedCandidatePair()
-				if err != nil {
-					h.logFn("headless: selected ICE pair error: %v", err)
-					return
-				}
-				if pair == nil {
-					h.logFn("headless: selected ICE pair: <nil>")
-					return
-				}
-
-				h.logFn(
-					"headless: selected ICE pair: local=%s/%s/%s remote=%s/%s/%s",
-					pair.Local.Typ.String(),
-					pair.Local.Protocol.String(),
-					pair.Local.Address,
-					pair.Remote.Typ.String(),
-					pair.Remote.Protocol.String(),
-					pair.Remote.Address,
-				)
-			}()
-		}
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		h.logFn("headless: PC state: %s", state.String())
