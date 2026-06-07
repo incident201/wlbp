@@ -21,7 +21,10 @@ import (
 	"whitelist-bypass/relay/tunnel"
 )
 
-const TopologyDirect = "DIRECT"
+const (
+	TopologyDirect   = "DIRECT"
+	vkForceRelayOnly = true
+)
 
 type CallInfo struct {
 	CallID     string
@@ -464,17 +467,47 @@ func (b *Bridge) handleVKMessage(raw []byte) {
 	}
 }
 
+func expandTurnURLsWithTCP(urls []string) []string {
+	seen := make(map[string]struct{}, len(urls)*2)
+	out := make([]string, 0, len(urls)*2)
+
+	add := func(u string) {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			return
+		}
+		if _, ok := seen[u]; ok {
+			return
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+
+	for _, u := range urls {
+		add(u)
+
+		if strings.HasPrefix(u, "turn:") && !strings.Contains(u, "transport=") {
+			add(u + "?transport=tcp")
+		}
+	}
+
+	return out
+}
+
 func buildICEServers(callInfo *CallInfo) []webrtc.ICEServer {
 	var servers []webrtc.ICEServer
-	if len(callInfo.StunServer.URLs) > 0 {
+	if !vkForceRelayOnly && len(callInfo.StunServer.URLs) > 0 {
 		servers = append(servers, webrtc.ICEServer{URLs: callInfo.StunServer.URLs})
 	}
 	if len(callInfo.TurnServer.URLs) > 0 {
-		urls := append([]string{}, callInfo.TurnServer.URLs...)
-		urls = append(urls, urls[len(urls)-1]+"?transport=tcp")
+		turnURLs := expandTurnURLsWithTCP(callInfo.TurnServer.URLs)
+		log.Printf("[relay] TURN urls expanded: %v", turnURLs)
 		servers = append(servers, webrtc.ICEServer{
-			URLs: urls, Username: callInfo.TurnServer.Username, Credential: callInfo.TurnServer.Credential,
+			URLs: turnURLs, Username: callInfo.TurnServer.Username, Credential: callInfo.TurnServer.Credential,
 		})
+	}
+	if vkForceRelayOnly {
+		log.Printf("[relay] ICE policy: relay-only")
 	}
 	return servers
 }
