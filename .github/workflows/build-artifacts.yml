@@ -1,22 +1,15 @@
-name: Build artifacts
+name: Build
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
-
-permissions:
-  contents: read
 
 jobs:
   build-headless-vk-creator-linux:
-    name: Build headless-vk-creator for Linux x64
+    name: Build headless-vk-creator for Linux
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -25,4 +18,126 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26
+          go-version: "1.24.x"
+          cache-dependency-path: |
+            relay/go.sum
+            headless/vk/go.sum
+
+      - name: Build headless-vk-creator
+        run: |
+          mkdir -p dist
+          go -C headless/vk build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o ../../dist/headless-vk-creator-linux-amd64 \
+            .
+
+      - name: Upload headless-vk-creator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-vk-creator-linux-amd64
+          path: dist/headless-vk-creator-linux-amd64
+          if-no-files-found: error
+
+  build-android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_API_LEVEL: "35"
+      ANDROID_MIN_API_LEVEL: "23"
+      ANDROID_NDK_VERSION: "29.0.14206865"
+      CGO_LDFLAGS: "-Wl,-z,max-page-size=16384"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+          cache-dependency-path: |
+            relay/go.sum
+            headless/vk/go.sum
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;35.0.0" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+
+      - name: Build gomobile AAR
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          cd relay
+          gomobile bind \
+            -v \
+            -trimpath \
+            -ldflags="-s -w" \
+            -target=android \
+            -androidapi "${ANDROID_MIN_API_LEVEL}" \
+            -o mobile.aar \
+            ./androidbind/
+
+          mkdir -p ../android-app/app/libs
+          cp mobile.aar ../android-app/app/libs/mobile.aar
+
+      - name: Build Android native relay libraries
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          mkdir -p android-app/app/src/main/jniLibs/arm64-v8a
+          mkdir -p android-app/app/src/main/jniLibs/armeabi-v7a
+
+          cd relay
+
+          GOOS=linux GOARCH=arm64 go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o ../android-app/app/src/main/jniLibs/arm64-v8a/librelay.so \
+            .
+
+          GOOS=linux GOARCH=arm go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o ../android-app/app/src/main/jniLibs/armeabi-v7a/librelay.so \
+            .
+
+      - name: Build release APK
+        run: |
+          cd android-app
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          find android-app -type f -name "*.apk" -print
+          cp android-app/app/build/outputs/apk/release/*.apk dist/
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*.apk
+          if-no-files-found: error
