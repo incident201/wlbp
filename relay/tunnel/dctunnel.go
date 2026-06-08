@@ -15,7 +15,8 @@ import (
 
 // Telemost chunk size
 const chunkSize = 994
-const dcStatsEnabled = false
+const dcStatsEnabled = true
+const dcMaxBufferedAmount = 256 * 1024
 
 type chunkBuf struct {
 	chunks [][]byte
@@ -82,7 +83,7 @@ func NewChunkedDCTunnel(readRaw datachannel.ReadWriteCloser, writeDC *webrtc.Dat
 		logFn("dctunnel: write DC detach failed: %v", err)
 		return nil
 	}
-	t := &DCTunnel{raw: readRaw, writeRaw: writeRaw, obf: obf, readBuf: readBuf, logFn: logFn, chunked: true}
+	t := &DCTunnel{dc: writeDC, raw: readRaw, writeRaw: writeRaw, obf: obf, readBuf: readBuf, logFn: logFn, chunked: true}
 	go t.readLoop()
 	go t.statsLoop()
 	return t
@@ -173,6 +174,19 @@ func (t *DCTunnel) deliverMessage(data []byte) {
 	}
 }
 
+func (t *DCTunnel) waitForBufferedAmount() bool {
+	if t.dc == nil {
+		return true
+	}
+
+	for t.dc.ReadyState() == webrtc.DataChannelStateOpen &&
+		t.dc.BufferedAmount() > dcMaxBufferedAmount {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	return t.dc.ReadyState() == webrtc.DataChannelStateOpen
+}
+
 func (t *DCTunnel) sendChunked(data []byte) {
 	w := t.writeRaw
 	if w == nil {
@@ -201,9 +215,15 @@ func (t *DCTunnel) sendChunked(data []byte) {
 		f[4] = byte(total >> 8)
 		f[5] = byte(total & 0xFF)
 		copy(f[6:], p)
+		if !t.waitForBufferedAmount() {
+			return
+		}
 		t.sendBytes.Add(uint64(len(f)))
 		t.sendMsgs.Add(1)
-		w.Write(f)
+		if _, err := w.Write(f); err != nil {
+			t.logFn("dctunnel: chunk write failed len=%d: %v", len(f), err)
+			return
+		}
 	}
 }
 
@@ -213,17 +233,27 @@ func (t *DCTunnel) sendRaw(data []byte) {
 		w = t.raw
 	}
 	if w != nil {
+		if !t.waitForBufferedAmount() {
+			return
+		}
 		t.sendBytes.Add(uint64(len(data)))
 		t.sendMsgs.Add(1)
-		w.Write(data)
+		if _, err := w.Write(data); err != nil {
+			t.logFn("dctunnel: raw write failed len=%d: %v", len(data), err)
+		}
 		return
 	}
 	if t.dc == nil || t.dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return
 	}
+	if !t.waitForBufferedAmount() {
+		return
+	}
 	t.sendBytes.Add(uint64(len(data)))
 	t.sendMsgs.Add(1)
-	t.dc.Send(data)
+	if err := t.dc.Send(data); err != nil {
+		t.logFn("dctunnel: dc send failed len=%d: %v", len(data), err)
+	}
 }
 
 func (t *DCTunnel) SendData(data []byte) {
@@ -247,10 +277,10 @@ func (t *DCTunnel) SendData(data []byte) {
 	})
 }
 
-func (t *DCTunnel) SetOnData(fn func([]byte))   { t.onData = fn }
-func (t *DCTunnel) OnData() func([]byte)        { return t.onData }
-func (t *DCTunnel) SetOnClose(fn func())         { t.onClose = fn }
-func (t *DCTunnel) Reconfigure(fps, batch int)   {}
+func (t *DCTunnel) SetOnData(fn func([]byte))  { t.onData = fn }
+func (t *DCTunnel) OnData() func([]byte)       { return t.onData }
+func (t *DCTunnel) SetOnClose(fn func())       { t.onClose = fn }
+func (t *DCTunnel) Reconfigure(fps, batch int) {}
 
 func (t *DCTunnel) statsLoop() {
 	if !dcStatsEnabled {
