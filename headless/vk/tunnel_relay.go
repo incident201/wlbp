@@ -50,7 +50,11 @@ type TunnelRelay struct {
 func (u *TunnelRelay) SetObfuscator(o *tunnel.TunnelObfuscator) { u.obf = o }
 
 func NewTunnelRelay() *TunnelRelay {
-	return &TunnelRelay{mode: "unknown"}
+	return &TunnelRelay{
+		mode:        "unknown",
+		readBufSize: common.DCBufSize,
+		maxDCBuf:    256 * 1024,
+	}
 }
 
 func (u *TunnelRelay) Init(iceServers []webrtc.ICEServer) error {
@@ -294,14 +298,19 @@ func (u *TunnelRelay) handleDCMessage(data []byte) {
 
 func (u *TunnelRelay) sendDCFrame(connID uint32, mt byte, payload []byte) {
 	u.dcMu.Lock()
-	defer u.dcMu.Unlock()
-	if u.dc == nil {
+	dc := u.dc
+	maxDCBuf := u.maxDCBuf
+	u.dcMu.Unlock()
+
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		return
 	}
+
 	buf := make([]byte, 5+len(payload))
 	binary.BigEndian.PutUint32(buf[0:4], connID)
 	buf[4] = mt
 	copy(buf[5:], payload)
+
 	wire := buf
 	if u.obf != nil {
 		wire = u.obf.EncryptPayload(buf)
@@ -309,7 +318,20 @@ func (u *TunnelRelay) sendDCFrame(connID uint32, mt byte, payload []byte) {
 			return
 		}
 	}
-	u.dc.Send(wire)
+
+	if maxDCBuf > 0 {
+		for dc.ReadyState() == webrtc.DataChannelStateOpen && dc.BufferedAmount() > maxDCBuf {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	if dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return
+	}
+
+	if err := dc.Send(wire); err != nil {
+		log.Printf("[dc] send failed conn=%d type=%d len=%d: %v", connID, mt, len(wire), err)
+	}
 }
 
 func (u *TunnelRelay) connectTCP(connID uint32, addr string) {
@@ -334,7 +356,7 @@ func (u *TunnelRelay) connectTCP(connID uint32, addr string) {
 
 	bufSz := u.readBufSize
 	if bufSz <= 0 {
-		bufSz = common.RTPBufSize
+		bufSz = common.DCBufSize
 	}
 	buf := make([]byte, bufSz)
 	sent := 0

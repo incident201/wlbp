@@ -622,7 +622,7 @@ func (h *VKHeadlessJoiner) initPC() {
 				h.logFn("headless: === DC TUNNEL CONNECTED ===")
 				h.Status.EmitStatus(common.StatusTunnelConnected)
 				if h.OnConnected != nil {
-					h.OnConnected(tunnel.NewDCTunnel(dc, h.obf, common.RTPBufSize, h.logFn))
+					h.OnConnected(tunnel.NewDCTunnel(dc, h.obf, common.DCBufSize, h.logFn))
 				}
 			}
 		})
